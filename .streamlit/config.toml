@@ -1,0 +1,12 @@
+[theme]
+# --- Base dark theme ---
+base = "dark"
+
+# --- Core palette ---
+primaryColor = "#7B61FF"             # bluish-purple accent (buttons, links)
+backgroundColor = "#13131A"          # almost-black background
+secondaryBackgroundColor = "#2E2C3A" # slightly lighter panels / sidebar
+textColor = "#FFFFFF"                # pure white text
+
+# --- Typography ---
+font = "sans serif"                  # Streamlit reads "User Inter" as a sans-serif system font
