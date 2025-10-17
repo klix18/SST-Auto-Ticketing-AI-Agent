@@ -6,12 +6,15 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from pinecone import Pinecone
 from pinecone.exceptions.exceptions import NotFoundException
+from dotenv import load_dotenv
 
 # ---------- CONFIG ----------
 MD_PATH = "/Users/kevinli_home/Desktop/SST-Ticketing-Agent/pinecone_db_2.md"
 
+
 # Pinecone (pods) host
-PINECONE_HOST = "https://sst-master-db-xxzkqyr.svc.aped-4627-b74a.pinecone.io"
+load_dotenv()
+PINECONE_HOST = os.getenv("PINECONE_HOST")
 # Default namespace
 PINECONE_NAMESPACE = None
 

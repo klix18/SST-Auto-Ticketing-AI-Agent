@@ -19,7 +19,7 @@ from app_5_variables import request_description
 load_dotenv()
 OPENAI_API_KEY   = os.getenv("OPENAI_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-PINECONE_HOST    = "https://sst-master-db-xxzkqyr.svc.aped-4627-b74a.pinecone.io"
+PINECONE_HOST = os.getenv("PINECONE_HOST")
 
 EMBED_MODEL = "text-embedding-3-small"
 EMBED_DIM   = 512
