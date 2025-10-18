@@ -8,6 +8,58 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from app_5_LLM import master_llm, master_flow_orchestrator, chat_response_parser_llm
+import base64, time
+
+LOCAL_LOADING_GIF = "/Users/kevinli_home/Desktop/SST-Ticketing-Agent/loading_screen_visual_2.gif"
+
+def _gif_b64(path: str) -> str:
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode("utf-8")
+
+def show_loading_overlay(message: str = "Processing your ticket..."):
+    """Display full-screen GIF overlay until cleared."""
+    gif64 = _gif_b64(LOCAL_LOADING_GIF)
+    placeholder = st.empty()
+    placeholder.markdown(
+        f"""
+        <style>
+          .sst-overlay {{
+              position: fixed; inset: 0;
+              background: rgba(10,10,14,0.92);
+              display: flex; align-items: center; justify-content: center;
+              flex-direction: column; z-index: 9999;
+              backdrop-filter: blur(2px);
+          }}
+          .sst-overlay h4 {{ color: #c9c9d1; margin-top: 16px; font-weight: 500; }}
+          body {{ overflow: hidden; }}
+        </style>
+        <div class="sst-overlay">
+            <img src="data:image/gif;base64,{gif64}" width="300">
+            <h4>{message}</h4>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    return placeholder
+
+def run_with_overlay(key: str, message: str, long_task_fn):
+    """Two-phase runner: render overlay, then execute long task."""
+    flag = f"__running_{key}"
+    if not st.session_state.get(flag):
+        # Phase 1 – set flag and rerun (so overlay can show)
+        st.session_state[flag] = True
+        st.session_state[f"{flag}_msg"] = message
+        st.rerun()
+        return
+
+    # Phase 2 – render overlay and run long task
+    overlay = show_loading_overlay(st.session_state.get(f"{flag}_msg", "Working..."))
+    try:
+        long_task_fn()
+    finally:
+        overlay.empty()
+        st.session_state.pop(flag, None)
+        st.session_state.pop(f"{flag}_msg", None)
 
 # ==========================================================
 # 🔐 ENV
@@ -246,21 +298,26 @@ if "page" not in st.session_state:
 # 🧾 PAGE 1 — Ticket Details
 # ==============================================================================================================================================================================
 def page_1_ticket_form():
+    
+    if "data_loaded" not in st.session_state:
+
+        # --- Show overlay immediately ---
+        overlay = show_loading_overlay("Initiating SST IO AI Ticketing Agent...")
+    # --- Fetch Airtable options ---
+        Submitted_Team_Branch = get_select_options("Submitted Team Branch")
+        Content_Brand = get_select_options("Content Brand")
+        Content_Type = get_select_options("Content Type")
+        Season_Num = get_select_options("Season #")
+        Episode_Num = get_select_options("Episode #")
+        Request_Type = get_select_options("Request Type")
+        Requested_By = get_linked_record_options(AIRTABLE_REQUESTORS_TABLE_ID)
+        Requested_By_Names = [r["name"] for r in Requested_By]
+        Watch_List = get_linked_record_options(AIRTABLE_WATCHLIST_TABLE_ID)
+        Watch_List_Names = [w["name"] for w in Watch_List]
+        
+        overlay.empty()
     st.title("🎟️ SST IO AI Ticketing Agent")
     st.subheader("Please Enter Ticket Details")
-
-    # --- Fetch Airtable options ---
-    Submitted_Team_Branch = get_select_options("Submitted Team Branch")
-    Content_Brand = get_select_options("Content Brand")
-    Content_Type = get_select_options("Content Type")
-    Season_Num = get_select_options("Season #")
-    Episode_Num = get_select_options("Episode #")
-    Request_Type = get_select_options("Request Type")
-    Requested_By = get_linked_record_options(AIRTABLE_REQUESTORS_TABLE_ID)
-    Requested_By_Names = [r["name"] for r in Requested_By]
-    Watch_List = get_linked_record_options(AIRTABLE_WATCHLIST_TABLE_ID)
-    Watch_List_Names = [w["name"] for w in Watch_List]
-
     # --- Widgets ---
     labeled_selectbox("Submitted Team Branch", Submitted_Team_Branch or ["(No options)"], "submitted_team_branch")
     labeled_selectbox("Requested By", Requested_By_Names or ["(No options)"], "requested_by_name")
@@ -305,60 +362,93 @@ def page_1_ticket_form():
                         ("Episode #", st.session_state.get("episode_nums"))]
 
     disable_next = any(_is_missing(name, val) for name, val in required_now)
+    st.session_state["original_request_type"] = st.session_state.get("request_type")
+
 
 
 
     # --- Next Button ---
+# --- Next Button ---
     if st.button("Next →", type="primary", disabled=disable_next):
-        # Step 1️⃣ Build the Airtable payload
-        fields = {
-            "Submitted Team Branch": st.session_state.get("submitted_team_branch"),
-            "Requested By": [r["id"] for r in get_linked_record_options(AIRTABLE_REQUESTORS_TABLE_ID)
-                            if r["name"] == st.session_state.get("requested_by_name")],
-            "Watch List": [w["id"] for w in get_linked_record_options(AIRTABLE_WATCHLIST_TABLE_ID)
-                        if w["name"] in st.session_state.get("watchlist_names", [])],
-            "Content Brand": st.session_state.get("content_brand"),
-            "Content Title": st.session_state.get("content_title"),
-            "Content Type": st.session_state.get("content_type"),
-            "Request Type": st.session_state.get("request_type"),
-            "Request Description": st.session_state.get("request_description"),
-        }
+        # Set a flag to indicate button was pressed
+        st.session_state.start_submit = True
+        st.rerun()
 
-        # Setup Variables
-        request_type = st.session_state.get("request_type")
-        request_description = st.session_state.get("request_description")
-
-        # Run LLM
-        master_llm_result = master_llm(request_description)
-        master_flow_result = master_flow_orchestrator(master_llm_result, request_type, request_description)
-
-        if "original_request_description" not in st.session_state:
-            st.session_state.original_request_description = st.session_state.get("request_description", "")
-
-
-        #Create a new record in Airtable
-        record_id = create_main_record(fields)
-
-        #Save the new record ID in session
-        if record_id:
-            st.session_state.record_id = record_id
-            # Step 4️⃣ Confirm success visually
-            st.success(f"✅ Ticket successfully created in Airtable!")
-            st.info(f"🆔 Record ID: `{record_id}`")
-            st.json(fields)
-        else:
-            st.error("❌ Failed to create Airtable record. Please check your API key or network.")
+    # --- Run the overlay and logic if flag is set ---
+    if st.session_state.get("start_submit"):
         
+        def page_1_button():
+            # Step 1️⃣ Build the Airtable payload
+            fields = {
+                "Submitted Team Branch": st.session_state.get("submitted_team_branch"),
+                "Requested By": [r["id"] for r in get_linked_record_options(AIRTABLE_REQUESTORS_TABLE_ID)
+                                if r["name"] == st.session_state.get("requested_by_name")],
+                "Watch List": [w["id"] for w in get_linked_record_options(AIRTABLE_WATCHLIST_TABLE_ID)
+                            if w["name"] in st.session_state.get("watchlist_names", [])],
+                "Content Brand": st.session_state.get("content_brand"),
+                "Content Title": st.session_state.get("content_title"),
+                "Content Type": st.session_state.get("content_type"),
+                "Request Type": st.session_state.get("request_type"),
+                "Request Description": st.session_state.get("request_description"),
+            }
 
-        # determine page to route to
-        if master_flow_result.get("action") == "COMPLETE":
-            st.session_state.page = 3
-            st.rerun()
-        elif master_flow_result.get("action") in ["CHATLLM", "RETRY"]:
-            st.session_state.master_flow_result = master_flow_result
-            st.session_state.master_llm_result = master_llm_result
-            st.session_state.page = 2
-            st.rerun()
+            # Setup Variables
+            request_type = st.session_state.get("request_type")
+            request_description = st.session_state.get("request_description")
+
+            # Run LLM
+            master_llm_result = master_llm(request_description)
+            master_flow_result = master_flow_orchestrator(master_llm_result, request_type, request_description)
+
+            if "original_request_description" not in st.session_state:
+                st.session_state.original_request_description = st.session_state.get("request_description", "")
+
+            # Create a new record in Airtable
+            record_id = create_main_record(fields)
+
+            # Save the new record ID in session
+            if record_id:
+                st.session_state.record_id = record_id
+                st.success("✅ Ticket successfully created in Airtable!")
+                st.info(f"🆔 Record ID: `{record_id}`")
+                st.json(fields)
+            else:
+                st.error("❌ Failed to create Airtable record. Please check your API key or network.")
+
+            
+
+            # ✅ Only seed chat history when we actually COMPLETE on Page 1
+            if master_flow_result.get("action") == "COMPLETE":
+                if "chat_history" not in st.session_state:
+                    st.session_state.chat_history = []
+                assistant_msg = (
+                    f"✅ Done — I've classified your request as **{master_llm_result.result}**.\n\n"
+                )
+                debug_trace = show_llm_trace(None, master_llm_result, master_flow_result)
+                st.session_state.chat_history.append({
+                    "role": "assistant",
+                    "content": assistant_msg,
+                    "debug": debug_trace,
+                })
+
+
+
+            # determine page to route to
+            if master_flow_result.get("action") == "COMPLETE":
+                st.session_state.page = 3
+                st.rerun()
+
+            elif master_flow_result.get("action") in ["CHATLLM", "RETRY"]:
+                st.session_state.master_flow_result = master_flow_result
+                st.session_state.master_llm_result = master_llm_result
+                st.session_state.page = 2
+                st.rerun()
+
+        run_with_overlay("submit_ticket", "Submitting your ticket…", page_1_button)
+        # ✅ Clear flag after completion
+        st.session_state.start_submit = False
+
+
 
 
 
@@ -383,7 +473,7 @@ def page_2_llm_chat():
     master_flow_orchestrator_action = master_flow_result.get("action", "")
 
     # --- Initialize chat history if empty ---
-    if "chat_history" not in st.session_state:
+    if not st.session_state.get("chat_history"):
         st.session_state.chat_history = []
 
         first_msg = master_flow_result.get(
@@ -463,13 +553,13 @@ def page_2_llm_chat():
 
         # === YES → Update Airtable and finish ===
         if user_response_type == "yes":
-            latest_result = st.session_state.master_llm_result.result
+            latest_result = master_llm_result.result
             if not latest_result:
                 st.warning("⚠️ No LLM result found. Please try again.")
                 return
 
             try:
-                success = update_record(st.session_state.record_id, {"Request Type": latest_result})
+                success = update_record(record_id, {"Request Type": latest_result})
                 if success:
                     st.success(f"✅ Airtable updated: Request Type → {latest_result}")
                 else:
@@ -478,7 +568,7 @@ def page_2_llm_chat():
                 st.warning(f"Could not update Airtable: {e}")
 
             confirmation_msg = f"✅ Done — I’ve updated the Request Type to **{latest_result}** in your ticket."
-            debug_text = show_llm_trace(parse_result, st.session_state.master_llm_result, st.session_state.master_flow_result)
+            debug_text = show_llm_trace(parse_result, None, None)
 
             st.session_state.chat_history.append({
                 "role": "assistant",
@@ -493,10 +583,12 @@ def page_2_llm_chat():
             st.session_state.page = 3
             st.rerun()
 
+
         # === NO → Keep current type and finish ===
         elif user_response_type == "no":
-            no_change_msg = f"Got it — keeping Request Type as **{st.session_state.request_type}**. Finishing up now."
-            debug_text = show_llm_trace(parse_result, st.session_state.master_llm_result, st.session_state.master_flow_result)
+            original_request_type = st.session_state.get("original_request_type", "(unknown)")
+            no_change_msg = f"Got it — keeping Request Type as **{original_request_type}**. Finishing up now." # this request type needs to be changed to one that has a value
+            debug_text = show_llm_trace(parse_result, None, None)
 
             st.session_state.chat_history.append({
                 "role": "assistant",
@@ -513,7 +605,7 @@ def page_2_llm_chat():
 
         # === UNRELATED / QUESTION → Just respond ===
         elif user_response_type in ["unrelated", "question"]:
-            debug_text = show_llm_trace(parse_result, st.session_state.master_llm_result, st.session_state.master_flow_result)
+            debug_text = show_llm_trace(parse_result, None, None)
             st.session_state.chat_history.append({
                 "role": "assistant",
                 "content": parser_response,
@@ -553,111 +645,6 @@ def page_2_llm_chat():
                 st.rerun()
 
 
-# ==========================================================
-# 💬 Handle CHATLLM logic — conversational follow-up
-# ==========================================================
-    elif master_flow_orchestrator_action == "CHATLLM":
-        # 1️⃣ Run the chat-response classifier on the user's message
-        parse_result = chat_response_parser_llm(user_input)
-
-        user_response_type = parse_result.get("user_response_type", "").lower().strip()
-        parser_response = parse_result.get("response", "")
-
-        # 2️⃣ Handle each user response type
-        if user_response_type == "yes":
-            # ✅ User confirmed they want to change the Request Type
-            # Retrieve the most recent classification result (already stored earlier)
-            latest_result = st.session_state.master_llm_result.result
-
-            if not latest_result:
-                st.warning("⚠️ No LLM result found. Please try again.")
-                return
-
-            # 🔹 Update Airtable record
-            try:
-                update_fields = {"Request Type": latest_result}
-                success = update_record(st.session_state.record_id, update_fields)
-                if not success:
-                    st.warning("⚠️ Could not update Airtable record.")
-                else:
-                    st.success(f"✅ Airtable updated: Request Type → {latest_result}")
-            except Exception as e:
-                st.warning(f"Could not update Airtable: {e}")
-
-
-            # ✅ Confirm change to user and end session
-            confirmation_msg = f"✅ Done — I’ve updated the Request Type to **{latest_result}** in your ticket."
-            show_llm_trace_debug = show_llm_trace(parse_result, st.session_state.master_llm_result, st.session_state.master_flow_result)
-            st.session_state.chat_history.append({"role": "assistant", "content": confirmation_msg, "debug": show_llm_trace_debug})
-            with st.chat_message("assistant"):
-                st.markdown(confirmation_msg)
-                show_llm_trace_debug
-
-            # ➡️ Move to Page 3
-            st.session_state.page = 3
-            st.rerun()
-
-
-        elif user_response_type == "no":
-            # User wants to keep their current Request Type
-            no_change_msg = f"Got it — keeping Request Type as **{st.session_state.request_type}**. Finishing up now."
-            show_llm_trace_debug = show_llm_trace(parse_result, st.session_state.master_llm_result, st.session_state.master_flow_result)
-            st.session_state.chat_history.append({"role": "assistant", "content": no_change_msg, "debug": show_llm_trace_debug})
-            with st.chat_message("assistant"):
-                st.markdown(no_change_msg)
-                show_llm_trace_debug
-
-            st.session_state.page = 3
-            st.rerun()
-
-        elif user_response_type in ["unrelated", "question"]:
-            # 3️⃣ Just display the assistant's response (no flow change)
-            show_llm_trace_debug = show_llm_trace(parse_result, st.session_state.master_llm_result, st.session_state.master_flow_result)
-            st.session_state.chat_history.append({"role": "assistant", "content": parser_response, "debug": show_llm_trace_debug})
-            with st.chat_message("assistant"):
-                st.markdown(parser_response)
-                show_llm_trace_debug
-                
-
-        elif user_response_type == "more context":
-            # 4️⃣ Rerun master_llm + orchestrator with the new context
-            st.session_state.request_description = user_input
-
-            # Run LLM again with updated description
-            master_llm_result = master_llm(user_input)
-
-            # Feed into master flow orchestrator
-            master_flow_result = master_flow_orchestrator(
-                master_llm_result,
-                request_type=request_type,
-                request_description=user_input
-            )
-
-            # ✅ Store both outputs in session for later use
-            st.session_state.master_llm_result = master_llm_result
-            st.session_state.master_flow_result = master_flow_result
-
-            # Extract updated action + response
-            new_action = master_flow_result.get("action", "")
-            response_text = master_flow_result.get("response_text", "")
-            show_llm_trace_debug = show_llm_trace(parse_result, st.session_state.master_llm_result, st.session_state.master_flow_result)
-
-            # Append and show assistant message
-            st.session_state.chat_history.append({"role": "assistant", "content": response_text, "debug": show_llm_trace_debug})
-            with st.chat_message("assistant"):
-                st.markdown(response_text)
-                show_llm_trace_debug
-
-
-            # Update current action for next cycle
-            st.session_state.master_flow_orchestrator_action = new_action
-
-            # If classification is now complete, move to Page 3
-            if new_action == "COMPLETE":
-                st.session_state.page = 3
-                st.rerun()
-
-
 
 
 # ==============================================================================================================================================================================
@@ -672,28 +659,46 @@ def page_3_confirmation():
     # ✅ Airtable updates (only once)
     record_id = st.session_state.get("record_id")
     if record_id and not st.session_state.get("final_updates_done", False):
-        # user description update
         update_consolidated_request_description(record_id)
-        # full chat history update
         update_chat_history_record(record_id)
         st.session_state.final_updates_done = True
 
     # 🎟️ Header
     st.title("Ticket Submitted Successfully!")
 
-    # 📋 Retrieve session data
+    # ---------------------------------------------------------
+    # ✅ Retrieve freshest data from session / Airtable helpers
+    # ---------------------------------------------------------
     record_id = st.session_state.get("record_id", "N/A")
     content_title = st.session_state.get("content_title", "(none)")
-    request_type = st.session_state.get("request_type", "(none)")
-    request_description = st.session_state.get("request_description", "(none)")
 
+    # ✅ Always use latest request type if changed mid-chat
+    request_type = (
+        st.session_state.get("latest_request_type")
+        or st.session_state.get("request_type")
+        or st.session_state.get("original_request_type")
+        or "(none)"
+    )
+
+    # ✅ Use the same combined text logic as Airtable
+    all_user_inputs = [
+        msg["content"] for msg in st.session_state.get("chat_history", [])
+        if msg.get("role") == "user"
+    ][::-1]
+    original_description = st.session_state.get("original_request_description", "")
+    request_description = "\n\n".join(reversed(all_user_inputs + [original_description])) or "(none)"
+
+    # ---------------------------------------------------------
     # 🪪 Airtable record link
+    # ---------------------------------------------------------
     AIRTABLE_RECORD_LINK = (
         f"https://airtable.com/appND6VjzjOv4rzUR/pagu1lpeir2Zqi4bw/"
         f"{record_id}?home=paggCoATZHAd9lHfD"
     )
 
+    # ---------------------------------------------------------
     # 🧾 Ticket Overview Card
+    # ---------------------------------------------------------
     st.markdown(
         f"""
         <div style='
@@ -725,6 +730,7 @@ def page_3_confirmation():
         "<div style='text-align:center; color:gray; margin-top:32px;'>You may now close this tab.</div>",
         unsafe_allow_html=True
     )
+
 
 
 # ==========================================================

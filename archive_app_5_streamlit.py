@@ -1,19 +1,3 @@
-#p much still the best - but i don;t think the show_llm_trace is being appended. USE THIS ONE as the basis, and add the rest from the test.py
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # ==========================================================
 # app_streamlit_page1.py — SST Ticket • Step 1
 # ==========================================================
@@ -123,43 +107,45 @@ def update_record(record_id: str, fields: dict):
 # ==========================================================
 # 🧠 DEBUG TRACE HELPER
 # ==========================================================
-def show_llm_trace(parse_result=None, master_llm_result=None, master_flow_result=None):
+def show_llm_trace(parse_result=None, master_llm_result=None, master_flow_result=None) -> str:
     """
-    Compact debug output showing what happened inside each reasoning layer:
-    - chat_response_parser_llm()
-    - master_llm()
-    - master_flow_orchestrator()
+    Returns a formatted Markdown string for debugging (does NOT render directly).
+    Each assistant message stores this string so it's only displayed under that message.
     """
     debug_info = []
 
     # Chat parser results
     if parse_result:
         debug_info.append(
+            f"\n"
             f"🟦 **chat_response_parser_llm:** "
-            f"user_response_type=`{parse_result.get('user_response_type', '-')}`, "
-            f"response=`{parse_result.get('response', '-')}`"
+            f"user_response_type=`{parse_result.get('user_response_type', '-')}`"
         )
 
     # Master LLM results
     if master_llm_result:
         debug_info.append(
+            f"\n"
             f"🟩 **master_llm:** "
             f"result=`{getattr(master_llm_result, 'result', '-')}`, "
-            f"confidence=`{getattr(master_llm_result, 'result_confidence', '-')}`, "
+            f"confidence=`{getattr(master_llm_result, 'result_confidence', '-')}%`, "
             f"summary=`{getattr(master_llm_result, 'result_summary', '-')}`"
         )
 
     # Orchestrator results
     if master_flow_result:
         debug_info.append(
+            f"\n"
             f"🟨 **master_flow_orchestrator:** "
             f"flow_type=`{master_flow_result.get('flow_type', '-')}`, "
             f"action=`{master_flow_result.get('action', '-')}`"
         )
 
-    # Display combined caption
+    # Combine and return (no Streamlit calls here!)
     if debug_info:
-        st.caption("  \n".join(debug_info))
+        return "\n".join(debug_info)
+    return ""
+
 
 # ==========================================================
 # 🔧 UI Helpers (Asterisk)
@@ -183,6 +169,72 @@ def labeled_text_input(label, key):
 def labeled_text_area(label, key, **kwargs):
     render_label(label)
     return st.text_area("", key=key, label_visibility="collapsed", **kwargs)
+
+# ==========================================================
+# Request description documentation helper
+# ==========================================================
+
+def update_consolidated_request_description(record_id: str):
+    """
+    Combine all user inputs and the original request_description
+    into one long text, then update Airtable's "Request Description" field.
+    Order: newest → oldest → original.
+    """
+    try:
+        # Start from the current session data
+        all_user_inputs = [
+            msg["content"] for msg in st.session_state.get("chat_history", [])
+            if msg.get("role") == "user"
+        ][::-1]
+        original_description = st.session_state.get("original_request_description", "")
+
+        # Concatenate (newest first)
+        combined_text = "\n\n".join(reversed(all_user_inputs + [original_description]))
+
+        # Update Airtable record
+        fields = {"Request Description": combined_text}
+        success = update_record(record_id, fields)
+
+        if success:
+            st.info("🪶 Updated Airtable Request Description with all chat context.")
+        else:
+            st.warning("⚠️ Failed to update Airtable Request Description.")
+    except Exception as e:
+        st.error(f"Error updating consolidated Request Description: {e}")
+
+# ==========================================================
+# ALL chat documentation helper
+# ==========================================================
+
+def update_chat_history_record(record_id: str):
+    """
+    Combine the entire chat_history (assistant + user + debug)
+    and save it to the Airtable 'Chatbot Chat History' field.
+    """
+    try:
+        chat_entries = []
+        for msg in st.session_state.get("chat_history", []):
+            role = msg.get("role", "unknown").capitalize()
+            content = msg.get("content", "")
+            debug = msg.get("debug", "")
+            if debug:
+                chat_entries.append(f"{role}: {content}\n{debug}")
+            else:
+                chat_entries.append(f"{role}: {content}")
+
+        # Combine with spacing
+        full_chat_log = "\n\n".join(chat_entries)
+
+        # Update Airtable
+        fields = {"Chatbot Chat History": full_chat_log}
+        success = update_record(record_id, fields)
+
+        if success:
+            st.info("💾 Chat history successfully saved to Airtable.")
+        else:
+            st.warning("⚠️ Failed to update Chatbot Chat History.")
+    except Exception as e:
+        st.error(f"Error updating Chatbot Chat History: {e}")
 
 # ==========================================================
 # 🧭 PAGE ROUTING (keep all pages in this file)
@@ -280,7 +332,8 @@ def page_1_ticket_form():
         master_llm_result = master_llm(request_description)
         master_flow_result = master_flow_orchestrator(master_llm_result, request_type, request_description)
 
-
+        if "original_request_description" not in st.session_state:
+            st.session_state.original_request_description = st.session_state.get("request_description", "")
 
 
         #Create a new record in Airtable
@@ -327,19 +380,33 @@ def page_2_llm_chat():
     request_description = st.session_state.get("request_description")
     master_flow_result = st.session_state.get("master_flow_result", {})
     record_id = st.session_state.get("record_id", None)
-    current_action = master_flow_result.get("action", "")
+    master_flow_orchestrator_action = master_flow_result.get("action", "")
 
     # --- Initialize chat history if empty ---
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
-        first_msg = master_flow_result.get("response_text", "Let's continue your ticket. Could you please describe your request again?")
-        st.session_state.chat_history.append({"role": "assistant", "content": first_msg})
+
+        first_msg = master_flow_result.get(
+            "response_text",
+            "Let's continue your ticket. Could you please describe your request again?"
+        )
+
+        # ✅ Create initial debug trace from the current LLM + flow state
+        first_debug = show_llm_trace(None, master_llm_result, master_flow_result)
+
+        st.session_state.chat_history.append({
+            "role": "assistant",
+            "content": first_msg,
+            "debug": first_debug
+        })
+
 
     # --- Display all previous chat messages ---
     for msg in st.session_state.chat_history:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
-            show_llm_trace(None, master_llm_result, master_flow_result)
+            if msg["role"] == "assistant" and msg.get("debug"):
+                st.caption(msg["debug"])
 
     # --- Chat Input ---
     user_input = st.chat_input("Type your reply…")
@@ -347,68 +414,154 @@ def page_2_llm_chat():
         return
 
     # --- Add user message ---
-    st.session_state.chat_history.append({"role": "user", "content": user_input})
+    st.session_state.chat_history.append({"role": "user", "content": user_input, "debug": ""})
     with st.chat_message("user"):
         st.markdown(user_input)
+        
 
-# FIRST LOGIC PART -----------------------------------
-
-# ==========================================================
-# 🔁 Handle RETRY logic — re-run full LLM classification
-# ==========================================================
-    if current_action == "RETRY":
-        # The user’s message becomes the new request_description
+    # ==========================================================
+    # 🔁 Handle RETRY logic — re-run full LLM classification
+    # ==========================================================
+    if master_flow_orchestrator_action == "RETRY":
         request_description = user_input
-        st.session_state.request_description = request_description  # keep updated for next turn
+        st.session_state.request_description = request_description
 
-        # 1️⃣ Run LLM again with the new user input
         master_llm_result = master_llm(request_description)
+        master_flow_result = master_flow_orchestrator(master_llm_result, request_type, request_description)
 
-        # 2️⃣ Feed that result into the master flow orchestrator
-        master_flow_result = master_flow_orchestrator(
-            master_llm_result,
-            request_type=request_type,                # stays constant from Page 1
-            request_description=request_description   # updates each turn
-        )
-
-        # 3️⃣ Store both results in session state (for later reference)
         st.session_state.master_llm_result = master_llm_result
         st.session_state.master_flow_result = master_flow_result
 
-        # 4️⃣ Extract key outputs
         new_action = master_flow_result.get("action", "")
         new_response_text = master_flow_result.get("response_text", "I'm not sure how to proceed.")
 
-        # 5️⃣ Show assistant message
-        with st.chat_message("assistant"):
-            st.markdown(new_response_text)
-            show_llm_trace(None, master_llm_result, master_flow_result)
-
-
-        # 6️⃣ Save assistant response to history
+        debug_text = show_llm_trace(None, master_llm_result, master_flow_result)
         st.session_state.chat_history.append({
             "role": "assistant",
-            "content": new_response_text
+            "content": new_response_text,
+            "debug": debug_text
         })
 
-        # 7️⃣ Update current_action for next turn
-        st.session_state.current_action = new_action
+        with st.chat_message("assistant"):
+            st.markdown(new_response_text)
+            if debug_text:
+                st.caption(debug_text)
 
-        # 8️⃣ If classification is complete, navigate to Page 3
+        st.session_state.master_flow_orchestrator_action = new_action
+
         if new_action == "COMPLETE":
             st.session_state.page = 3
             st.rerun()
+
+    # ==========================================================
+    # 💬 Handle CHATLLM logic — conversational follow-up
+    # ==========================================================
+    elif master_flow_orchestrator_action == "CHATLLM":
+        parse_result = chat_response_parser_llm(user_input)
+        user_response_type = parse_result.get("user_response_type", "").lower().strip()
+        parser_response = parse_result.get("response", "")
+
+        # === YES → Update Airtable and finish ===
+        if user_response_type == "yes":
+            latest_result = st.session_state.master_llm_result.result
+            if not latest_result:
+                st.warning("⚠️ No LLM result found. Please try again.")
+                return
+
+            try:
+                success = update_record(st.session_state.record_id, {"Request Type": latest_result})
+                if success:
+                    st.success(f"✅ Airtable updated: Request Type → {latest_result}")
+                else:
+                    st.warning("⚠️ Could not update Airtable record.")
+            except Exception as e:
+                st.warning(f"Could not update Airtable: {e}")
+
+            confirmation_msg = f"✅ Done — I’ve updated the Request Type to **{latest_result}** in your ticket."
+            debug_text = show_llm_trace(parse_result, st.session_state.master_llm_result, st.session_state.master_flow_result)
+
+            st.session_state.chat_history.append({
+                "role": "assistant",
+                "content": confirmation_msg,
+                "debug": debug_text
+            })
+            with st.chat_message("assistant"):
+                st.markdown(confirmation_msg)
+                if debug_text:
+                    st.caption(debug_text)
+
+            st.session_state.page = 3
+            st.rerun()
+
+        # === NO → Keep current type and finish ===
+        elif user_response_type == "no":
+            no_change_msg = f"Got it — keeping Request Type as **{st.session_state.request_type}**. Finishing up now."
+            debug_text = show_llm_trace(parse_result, st.session_state.master_llm_result, st.session_state.master_flow_result)
+
+            st.session_state.chat_history.append({
+                "role": "assistant",
+                "content": no_change_msg,
+                "debug": debug_text
+            })
+            with st.chat_message("assistant"):
+                st.markdown(no_change_msg)
+                if debug_text:
+                    st.caption(debug_text)
+
+            st.session_state.page = 3
+            st.rerun()
+
+        # === UNRELATED / QUESTION → Just respond ===
+        elif user_response_type in ["unrelated", "question"]:
+            debug_text = show_llm_trace(parse_result, st.session_state.master_llm_result, st.session_state.master_flow_result)
+            st.session_state.chat_history.append({
+                "role": "assistant",
+                "content": parser_response,
+                "debug": debug_text
+            })
+            with st.chat_message("assistant"):
+                st.markdown(parser_response)
+                if debug_text:
+                    st.caption(debug_text)
+
+        # === MORE CONTEXT → Re-run classification ===
+        elif user_response_type == "more context":
+            st.session_state.request_description = user_input
+            master_llm_result = master_llm(user_input)
+            master_flow_result = master_flow_orchestrator(master_llm_result, request_type, user_input)
+
+            st.session_state.master_llm_result = master_llm_result
+            st.session_state.master_flow_result = master_flow_result
+
+            new_action = master_flow_result.get("action", "")
+            response_text = master_flow_result.get("response_text", "")
+            debug_text = show_llm_trace(parse_result, master_llm_result, master_flow_result)
+
+            st.session_state.chat_history.append({
+                "role": "assistant",
+                "content": response_text,
+                "debug": debug_text
+            })
+            with st.chat_message("assistant"):
+                st.markdown(response_text)
+                if debug_text:
+                    st.caption(debug_text)
+
+            st.session_state.master_flow_orchestrator_action = new_action
+            if new_action == "COMPLETE":
+                st.session_state.page = 3
+                st.rerun()
 
 
 # ==========================================================
 # 💬 Handle CHATLLM logic — conversational follow-up
 # ==========================================================
-    elif current_action == "CHATLLM":
+    elif master_flow_orchestrator_action == "CHATLLM":
         # 1️⃣ Run the chat-response classifier on the user's message
         parse_result = chat_response_parser_llm(user_input)
 
         user_response_type = parse_result.get("user_response_type", "").lower().strip()
-        chat_reply = parse_result.get("response", "")
+        parser_response = parse_result.get("response", "")
 
         # 2️⃣ Handle each user response type
         if user_response_type == "yes":
@@ -434,10 +587,11 @@ def page_2_llm_chat():
 
             # ✅ Confirm change to user and end session
             confirmation_msg = f"✅ Done — I’ve updated the Request Type to **{latest_result}** in your ticket."
-            st.session_state.chat_history.append({"role": "assistant", "content": confirmation_msg})
+            show_llm_trace_debug = show_llm_trace(parse_result, st.session_state.master_llm_result, st.session_state.master_flow_result)
+            st.session_state.chat_history.append({"role": "assistant", "content": confirmation_msg, "debug": show_llm_trace_debug})
             with st.chat_message("assistant"):
                 st.markdown(confirmation_msg)
-                show_llm_trace(parse_result, st.session_state.master_llm_result, st.session_state.master_flow_result)
+                show_llm_trace_debug
 
             # ➡️ Move to Page 3
             st.session_state.page = 3
@@ -447,20 +601,23 @@ def page_2_llm_chat():
         elif user_response_type == "no":
             # User wants to keep their current Request Type
             no_change_msg = f"Got it — keeping Request Type as **{st.session_state.request_type}**. Finishing up now."
-            st.session_state.chat_history.append({"role": "assistant", "content": no_change_msg})
+            show_llm_trace_debug = show_llm_trace(parse_result, st.session_state.master_llm_result, st.session_state.master_flow_result)
+            st.session_state.chat_history.append({"role": "assistant", "content": no_change_msg, "debug": show_llm_trace_debug})
             with st.chat_message("assistant"):
                 st.markdown(no_change_msg)
-                show_llm_trace(parse_result, st.session_state.master_llm_result, st.session_state.master_flow_result)
+                show_llm_trace_debug
 
             st.session_state.page = 3
             st.rerun()
 
         elif user_response_type in ["unrelated", "question"]:
             # 3️⃣ Just display the assistant's response (no flow change)
-            st.session_state.chat_history.append({"role": "assistant", "content": chat_reply})
+            show_llm_trace_debug = show_llm_trace(parse_result, st.session_state.master_llm_result, st.session_state.master_flow_result)
+            st.session_state.chat_history.append({"role": "assistant", "content": parser_response, "debug": show_llm_trace_debug})
             with st.chat_message("assistant"):
-                st.markdown(chat_reply)
-                show_llm_trace(parse_result, st.session_state.master_llm_result, st.session_state.master_flow_result)
+                st.markdown(parser_response)
+                show_llm_trace_debug
+                
 
         elif user_response_type == "more context":
             # 4️⃣ Rerun master_llm + orchestrator with the new context
@@ -483,16 +640,17 @@ def page_2_llm_chat():
             # Extract updated action + response
             new_action = master_flow_result.get("action", "")
             response_text = master_flow_result.get("response_text", "")
+            show_llm_trace_debug = show_llm_trace(parse_result, st.session_state.master_llm_result, st.session_state.master_flow_result)
 
             # Append and show assistant message
-            st.session_state.chat_history.append({"role": "assistant", "content": response_text})
+            st.session_state.chat_history.append({"role": "assistant", "content": response_text, "debug": show_llm_trace_debug})
             with st.chat_message("assistant"):
                 st.markdown(response_text)
-                show_llm_trace(parse_result, st.session_state.master_llm_result, st.session_state.master_flow_result)
+                show_llm_trace_debug
 
 
             # Update current action for next cycle
-            st.session_state.current_action = new_action
+            st.session_state.master_flow_orchestrator_action = new_action
 
             # If classification is now complete, move to Page 3
             if new_action == "COMPLETE":
@@ -510,6 +668,15 @@ def page_3_confirmation():
 
     # 🎈 Balloon animation
     st.balloons()
+
+    # ✅ Airtable updates (only once)
+    record_id = st.session_state.get("record_id")
+    if record_id and not st.session_state.get("final_updates_done", False):
+        # user description update
+        update_consolidated_request_description(record_id)
+        # full chat history update
+        update_chat_history_record(record_id)
+        st.session_state.final_updates_done = True
 
     # 🎟️ Header
     st.title("Ticket Submitted Successfully!")
